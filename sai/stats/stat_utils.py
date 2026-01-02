@@ -19,37 +19,59 @@
 
 
 import numpy as np
+import allel
 from typing import Tuple, Optional, Union
 
-
-def calc_freq(gts: np.ndarray, ploidy: int = 1) -> np.ndarray:
+def calc_freq(gts: Union[np.ndarray, "allel.GenotypeArray"], ploidy: int = 1) -> np.ndarray:
     """
-    Calculates allele frequencies, supporting both phased and unphased data.
+    Calculate ALT allele frequency per locus.
+
+    Supports scikit-allel GenotypeArray or NumPy arrays.
+    Missing genotypes are ignored by scikit-allel internally.
 
     Parameters
     ----------
-    gts : np.ndarray
-        A 2D numpy array where each row represents a locus and each column represents an individual.
-    ploidy : int, optional
-        Ploidy level of the organism. If ploidy=1, the function assumes phased data and calculates
-        frequency by taking the mean across individuals. For unphased data, it calculates frequency by
-        dividing the sum across individuals by the total number of alleles. Default is 1.
+    gts : np.ndarray or allel.GenotypeArray
+        Genotype data.
+    ploidy : int
+        Ploidy level.
 
     Returns
     -------
     np.ndarray
-        An array of allele frequencies for each locus.
-
-    Raises
-    ------
-    ValueError
-        If ploidy is not a positive integer.
+        ALT allele frequency per locus.
     """
     if not isinstance(ploidy, int) or ploidy <= 0:
         raise ValueError("ploidy must be a positive integer.")
 
-    return np.sum(gts, axis=1) / (gts.shape[1] * ploidy)
+    # Case 1: scikit-allel GenotypeArray
+    if isinstance(gts, allel.GenotypeArray):
+        ac = gts.count_alleles(max_allele=1)
+        af = ac.to_frequencies(fill=np.nan)[:, 1]
+        return af
 
+    # Case 2: NumPy array
+    gts = np.asarray(gts)
+
+    if gts.ndim == 3:
+        # Convert to GenotypeArray (handles missing = -1 correctly)
+        ac = allel.GenotypeArray(gts).count_alleles(max_allele=1)
+        af = ac.to_frequencies(fill=np.nan)[:, 1]
+        return af
+
+    elif gts.ndim == 2:
+        # gts is ALT allele indicator per haploid sample: 0 or 1
+        valid = (gts == 0) | (gts == 1)
+        alt_sum = np.sum(gts * valid, axis=1)
+        denom = np.sum(valid, axis=1)
+    
+        af = np.full(gts.shape[0], np.nan)
+        mask = denom > 0
+        af[mask] = alt_sum[mask] / denom[mask]
+        return af
+
+    else:
+        raise ValueError(f"Unsupported gts shape: {gts.shape}")
 
 def compute_matching_loci(
     ref_gts: np.ndarray,
@@ -117,6 +139,16 @@ def compute_matching_loci(
         for src_gts, ploidy_val in zip(src_gts_list, ploidy[2:])
     ]
 
+    valid = (
+        np.isfinite(ref_freq) & (ref_freq >= 0) & (ref_freq <= 1) &
+        np.isfinite(tgt_freq) & (tgt_freq >= 0) & (tgt_freq <= 1)
+    )
+    for src_freq in src_freq_list:
+        valid &= (
+            np.isfinite(src_freq) &
+            (src_freq >= 0) & (src_freq <= 1)
+        )
+
     # Check match for each `y`
     op_funcs = {
         "=": lambda src_freq, y: src_freq == y,
@@ -141,7 +173,7 @@ def compute_matching_loci(
         all_match = all_match_y | all_match_1_minus_y
 
         # Identify loci where all sources match `1 - y` for frequency inversion
-        inverted = all_match_1_minus_y
+        inverted = all_match_1_minus_y & valid
 
         # Invert frequencies for these loci
         ref_freq[inverted] = 1 - ref_freq[inverted]
@@ -149,8 +181,9 @@ def compute_matching_loci(
     else:
         all_match = all_match_y
 
-    # Final condition: locus must satisfy source matching and have `ref_freq < w`
-    condition = all_match & (ref_freq < w)
+    # Final condition: locus must satisfy source matching and have `ref_freq < w` and have valid frequency
+    #condition = all_match & (ref_freq < w)
+    condition = valid & all_match & (ref_freq < w)
 
     return ref_freq, tgt_freq, condition
 
