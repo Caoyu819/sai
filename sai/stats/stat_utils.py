@@ -22,16 +22,14 @@ import numpy as np
 import allel
 from typing import Tuple, Optional, Union
 
-def calc_freq(gts: Union[np.ndarray, "allel.GenotypeArray"], ploidy: int = 1) -> np.ndarray:
+
+def calc_freq(gts: np.ndarray, ploidy: int = 1) -> np.ndarray:
     """
     Calculate ALT allele frequency per locus.
 
-    Supports scikit-allel GenotypeArray or NumPy arrays.
-    Missing genotypes are ignored by scikit-allel internally.
-
     Parameters
     ----------
-    gts : np.ndarray or allel.GenotypeArray
+    gts : np.ndarray
         Genotype data.
     ploidy : int
         Ploidy level.
@@ -44,34 +42,15 @@ def calc_freq(gts: Union[np.ndarray, "allel.GenotypeArray"], ploidy: int = 1) ->
     if not isinstance(ploidy, int) or ploidy <= 0:
         raise ValueError("ploidy must be a positive integer.")
 
-    # Case 1: scikit-allel GenotypeArray
-    if isinstance(gts, allel.GenotypeArray):
-        ac = gts.count_alleles(max_allele=1)
-        af = ac.to_frequencies(fill=np.nan)[:, 1]
-        return af
+    mask = gts < 0  # remove missing data as scikit-allel converts missing data to -1
+    called = (~mask).sum(axis=1)
 
-    # Case 2: NumPy array
-    gts = np.asarray(gts)
+    num = np.where(~mask, gts, 0).sum(axis=1, dtype=float)
+    den = called * ploidy
 
-    if gts.ndim == 3:
-        # Convert to GenotypeArray (handles missing = -1 correctly)
-        ac = allel.GenotypeArray(gts).count_alleles(max_allele=1)
-        af = ac.to_frequencies(fill=np.nan)[:, 1]
-        return af
+    out = np.full(gts.shape[0], np.nan, dtype=float)
+    return np.divide(num, den, out=out, where=den > 0)
 
-    elif gts.ndim == 2:
-        # gts is ALT allele indicator per haploid sample: 0 or 1
-        valid = (gts == 0) | (gts == 1)
-        alt_sum = np.sum(gts * valid, axis=1)
-        denom = np.sum(valid, axis=1)
-    
-        af = np.full(gts.shape[0], np.nan)
-        mask = denom > 0
-        af[mask] = alt_sum[mask] / denom[mask]
-        return af
-
-    else:
-        raise ValueError(f"Unsupported gts shape: {gts.shape}")
 
 def compute_matching_loci(
     ref_gts: np.ndarray,
@@ -140,14 +119,15 @@ def compute_matching_loci(
     ]
 
     valid = (
-        np.isfinite(ref_freq) & (ref_freq >= 0) & (ref_freq <= 1) &
-        np.isfinite(tgt_freq) & (tgt_freq >= 0) & (tgt_freq <= 1)
+        np.isfinite(ref_freq)
+        & (ref_freq >= 0)
+        & (ref_freq <= 1)
+        & np.isfinite(tgt_freq)
+        & (tgt_freq >= 0)
+        & (tgt_freq <= 1)
     )
     for src_freq in src_freq_list:
-        valid &= (
-            np.isfinite(src_freq) &
-            (src_freq >= 0) & (src_freq <= 1)
-        )
+        valid &= np.isfinite(src_freq) & (src_freq >= 0) & (src_freq <= 1)
 
     # Check match for each `y`
     op_funcs = {
@@ -182,7 +162,7 @@ def compute_matching_loci(
         all_match = all_match_y
 
     # Final condition: locus must satisfy source matching and have `ref_freq < w` and have valid frequency
-    #condition = all_match & (ref_freq < w)
+    # condition = all_match & (ref_freq < w)
     condition = valid & all_match & (ref_freq < w)
 
     return ref_freq, tgt_freq, condition
